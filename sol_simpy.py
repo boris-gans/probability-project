@@ -1,9 +1,9 @@
 import simpy
 import numpy as np
-import random
+import random2 as random
 import matplotlib.pyplot as plt
 from scipy import stats
-from collections import defaultdict
+from collection import defaultdict
 import pandas as pd
 
 # Simulation parameters (easy to modify)
