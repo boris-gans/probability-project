@@ -3,7 +3,7 @@ import numpy as np
 import random2 as random
 import matplotlib.pyplot as plt
 from scipy import stats
-from collection import defaultdict
+from collections import defaultdict
 import pandas as pd
 
 # Simulation parameters (easy to modify)
@@ -14,8 +14,8 @@ INITIAL_PEOPLE_METRO = 100
 INITIAL_PEOPLE_CERCANIAS = 100
 
 # Capacity limits
-METRO_CAPACITY = 500
-CERCANIAS_CAPACITY = 400
+METRO_CAPACITY = 2000
+CERCANIAS_CAPACITY = 750
 
 # Operating hours
 START_HOUR = 6.0    # 6:00 AM
@@ -43,14 +43,14 @@ CERCANIAS_TO_CERCANIAS_PROB = 0.02
 CERCANIAS_TO_METRO_PROB = 0.588
 CERCANIAS_TO_ENTRANCE_PROB = 0.392
 
-# Arrival and departure rates
-METRO_ARRIVAL_RATE = 40
-ENTRANCE_ARRIVAL_RATE = 30
-CERCANIAS_ARRIVAL_RATE = 35
+# Generation and departure rates for each area (people per hour)
+METRO_GENERATION_RATE = 40      # People generated directly in Metro
+ENTRANCE_GENERATION_RATE = 30   # People generated directly in Entrance
+CERCANIAS_GENERATION_RATE = 35  # People generated directly in Cercanias
 
-METRO_DEPARTURE_RATE = 35
-ENTRANCE_DEPARTURE_RATE = 25
-CERCANIAS_DEPARTURE_RATE = 30
+METRO_DEPARTURE_RATE = 35       # People leaving from Metro
+ENTRANCE_DEPARTURE_RATE = 25    # People leaving from Entrance  
+CERCANIAS_DEPARTURE_RATE = 30   # People leaving from Cercanias
 
 # Simulation time step (in minutes)
 STEP_INTERVAL = 10  # Minutes between each flow calculation
@@ -102,13 +102,25 @@ class TimeOfDay:
 
 class StationArea:
     """Base class for station areas (Entrance, Metro, Cercanias)"""
-    def __init__(self, env, name, initial_people, capacity=float('inf')):
+    def __init__(self, env, name, initial_people, capacity=float('inf'), generation_rate=0, departure_rate=0):
         self.env = env
         self.name = name
         self.resource = simpy.Container(env, init=initial_people, capacity=capacity)
         self.waiting_people = 0
         self.turned_away = 0
         self.queue_times = []
+        
+        # Flow rates
+        self.generation_rate = generation_rate
+        self.departure_rate = departure_rate
+        
+        # Step metrics
+        self.step_input = 0
+        self.step_output = 0
+        self.step_generated = 0
+        self.step_departed = 0
+        
+        # Overall metrics
         self.metrics = {
             'queue_length': [],
             'time': [],
@@ -133,25 +145,43 @@ class StationArea:
         self.metrics['entries'] = defaultdict(int)
         self.metrics['exits'] = defaultdict(int)
         self.metrics['rejected'] = defaultdict(int)
+    
+    def reset_step_metrics(self):
+        """Reset metrics for the current step"""
+        self.step_input = 0
+        self.step_output = 0
+        self.step_generated = 0
+        self.step_departed = 0
 
 class Entrance(StationArea):
     """Entrance area of the station"""
-    def __init__(self, env, initial_people=INITIAL_PEOPLE_ENTRANCE):
-        super().__init__(env, "Entrance", initial_people)
+    def __init__(self, env, initial_people=INITIAL_PEOPLE_ENTRANCE, 
+                 generation_rate=ENTRANCE_GENERATION_RATE, 
+                 departure_rate=ENTRANCE_DEPARTURE_RATE):
+        super().__init__(env, "Entrance", initial_people, float('inf'), 
+                        generation_rate, departure_rate)
 
 class Metro(StationArea):
     """Metro area of the station"""
-    def __init__(self, env, initial_people=INITIAL_PEOPLE_METRO, capacity=METRO_CAPACITY):
-        super().__init__(env, "Metro", initial_people, capacity)
+    def __init__(self, env, initial_people=INITIAL_PEOPLE_METRO, 
+                capacity=METRO_CAPACITY, 
+                generation_rate=METRO_GENERATION_RATE, 
+                departure_rate=METRO_DEPARTURE_RATE):
+        super().__init__(env, "Metro", initial_people, capacity, 
+                        generation_rate, departure_rate)
 
 class Cercanias(StationArea):
     """Cercanias area of the station"""
-    def __init__(self, env, initial_people=INITIAL_PEOPLE_CERCANIAS, capacity=CERCANIAS_CAPACITY):
-        super().__init__(env, "Cercanias", initial_people, capacity)
+    def __init__(self, env, initial_people=INITIAL_PEOPLE_CERCANIAS, 
+                capacity=CERCANIAS_CAPACITY, 
+                generation_rate=CERCANIAS_GENERATION_RATE, 
+                departure_rate=CERCANIAS_DEPARTURE_RATE):
+        super().__init__(env, "Cercanias", initial_people, capacity, 
+                        generation_rate, departure_rate)
 
 class Person:
     """Represents a person moving through the station"""
-    def __init__(self, env, id, source="Outside"):
+    def __init__(self, env, id, source="Generated"):
         self.env = env
         self.id = id
         self.entry_time = env.now
@@ -188,22 +218,25 @@ class StationSimulation:
         
         # Start processes
         self.processes = [
-            # External arrivals
-            env.process(self.generate_arrivals(self.metro, METRO_ARRIVAL_RATE, "Outside")),
-            env.process(self.generate_arrivals(self.entrance, ENTRANCE_ARRIVAL_RATE, "Outside")),
-            env.process(self.generate_arrivals(self.cercanias, CERCANIAS_ARRIVAL_RATE, "Outside")),
+            # Internal generation within each area
+            env.process(self.generate_people(self.metro)),
+            env.process(self.generate_people(self.entrance)),
+            env.process(self.generate_people(self.cercanias)),
             
-            # External departures
-            env.process(self.generate_departures(self.metro, METRO_DEPARTURE_RATE, "Outside")),
-            env.process(self.generate_departures(self.entrance, ENTRANCE_DEPARTURE_RATE, "Outside")),
-            env.process(self.generate_departures(self.cercanias, CERCANIAS_DEPARTURE_RATE, "Outside")),
+            # Internal departures from each area
+            env.process(self.remove_people(self.metro)),
+            env.process(self.remove_people(self.entrance)),
+            env.process(self.remove_people(self.cercanias)),
             
             # Internal people flows
             env.process(self.flow_between_areas()),
             
             # Metrics collection
             env.process(self.collect_metrics()),
-            env.process(self.display_status())
+            env.process(self.display_status()),
+            
+            # Debug flow reporting
+            env.process(self.report_flows())
         ]
         
         # Lists for plotting
@@ -221,8 +254,8 @@ class StationSimulation:
         current_hour = self.get_current_hour()
         return self.time_system.get_time_factor(current_hour)
     
-    def generate_arrivals(self, area, base_rate, source):
-        """Generate arrivals from outside the system to an area"""
+    def generate_people(self, area):
+        """Generate people directly within an area"""
         while True:
             current_hour = self.get_current_hour()
             
@@ -231,36 +264,47 @@ class StationSimulation:
                 yield self.env.timeout(STEP_INTERVAL)
                 continue
             
-            # Calculate arrival rate based on time of day
+            # Calculate generation rate based on time of day
             time_factor = self.time_system.get_time_factor(current_hour)
-            adjusted_rate = base_rate * time_factor * 3.0
-            adjusted_rate = max(adjusted_rate, base_rate * 0.2)
+            adjusted_rate = area.generation_rate * time_factor * 3.0
+            adjusted_rate = max(adjusted_rate, area.generation_rate * 0.2)
             
-            # Generate random number of arrivals
-            arrivals = random.randint(int(0.7 * adjusted_rate), int(1.3 * adjusted_rate))
+            # Scale down for the step interval (rate is per hour)
+            step_rate = adjusted_rate * (STEP_INTERVAL / 60.0)
+            
+            # Generate random number of people
+            to_generate = random.randint(int(0.7 * step_rate), int(1.3 * step_rate))
             
             # Process arrivals based on capacity
             available_space = area.resource.capacity - area.resource.level
-            accepted = min(arrivals, available_space) if area.resource.capacity < float('inf') else arrivals
-            rejected = arrivals - accepted
+            accepted = min(to_generate, available_space) if area.resource.capacity < float('inf') else to_generate
+            rejected = to_generate - accepted
             
             if accepted > 0:
                 # Create people and add them to the area
                 for _ in range(accepted):
-                    person = Person(self.env, self.person_count, source)
+                    person = Person(self.env, self.person_count, f"Generated in {area.name}")
                     self.person_count += 1
-                    yield area.resource.put(1)
-                    area.metrics['entries'][source] += 1
+                
+                # Add people to the area
+                yield area.resource.put(accepted)
+                
+                # Record metrics
+                area.step_generated += accepted
+                area.metrics['entries']["Generated"] += accepted
+                
+                print(f"Generated {accepted} people directly in {area.name}")
                 
             if rejected > 0:
                 area.turned_away += rejected
-                area.metrics['rejected'][source] += rejected
+                area.metrics['rejected']["Generated"] += rejected
+                print(f"Rejected {rejected} generated people due to capacity in {area.name}")
                 
-            # Wait until next arrival cycle
+            # Wait until next generation cycle
             yield self.env.timeout(STEP_INTERVAL)
     
-    def generate_departures(self, area, base_rate, destination):
-        """Generate departures from an area to outside the system"""
+    def remove_people(self, area):
+        """Remove people directly from an area (they leave the system)"""
         while True:
             current_hour = self.get_current_hour()
             
@@ -271,16 +315,25 @@ class StationSimulation:
             
             # Calculate departure rate based on time of day
             time_factor = self.time_system.get_time_factor(current_hour)
-            adjusted_rate = base_rate * time_factor * 3.0
-            adjusted_rate = max(adjusted_rate, base_rate * 0.2)
+            adjusted_rate = area.departure_rate * time_factor * 3.0
+            adjusted_rate = max(adjusted_rate, area.departure_rate * 0.2)
+            
+            # Scale down for the step interval (rate is per hour)
+            step_rate = adjusted_rate * (STEP_INTERVAL / 60.0)
             
             # Generate random number of departures (capped by current population)
-            max_departures = min(random.randint(int(0.7 * adjusted_rate), int(1.3 * adjusted_rate)), 
-                               area.resource.level)
+            to_depart = min(random.randint(int(0.7 * step_rate), int(1.3 * step_rate)), 
+                          area.resource.level)
             
-            if max_departures > 0:
-                yield area.resource.get(max_departures)
-                area.metrics['exits'][destination] += max_departures
+            if to_depart > 0:
+                # Remove people from the area
+                yield area.resource.get(to_depart)
+                
+                # Record metrics
+                area.step_departed += to_depart
+                area.metrics['exits']["Departed"] += to_depart
+                
+                print(f"{to_depart} people departed from {area.name}")
             
             # Wait until next departure cycle
             yield self.env.timeout(STEP_INTERVAL)
@@ -289,6 +342,10 @@ class StationSimulation:
         """Handle the flow of people between different areas of the station"""
         while True:
             current_hour = self.get_current_hour()
+            
+            # Reset step metrics
+            for area in [self.metro, self.entrance, self.cercanias]:
+                area.reset_step_metrics()
             
             # Skip if outside operating hours
             if current_hour < self.time_system.start_hour or current_hour > self.time_system.end_hour:
@@ -308,6 +365,7 @@ class StationSimulation:
                     # Remove from Metro
                     yield self.metro.resource.get(metro_to_cercanias)
                     self.metro.metrics['exits']["Cercanias"] += metro_to_cercanias
+                    self.metro.step_output += metro_to_cercanias
                     
                     # Add to Cercanias (respecting capacity)
                     available_space = self.cercanias.resource.capacity - self.cercanias.resource.level
@@ -317,6 +375,7 @@ class StationSimulation:
                     if accepted > 0:
                         yield self.cercanias.resource.put(accepted)
                         self.cercanias.metrics['entries']["Metro"] += accepted
+                        self.cercanias.step_input += accepted
                     
                     if rejected > 0:
                         self.cercanias.turned_away += rejected
@@ -327,10 +386,12 @@ class StationSimulation:
                     # Remove from Metro
                     yield self.metro.resource.get(metro_to_entrance)
                     self.metro.metrics['exits']["Entrance"] += metro_to_entrance
+                    self.metro.step_output += metro_to_entrance
                     
                     # Add to Entrance (no capacity limit)
                     yield self.entrance.resource.put(metro_to_entrance)
                     self.entrance.metrics['entries']["Metro"] += metro_to_entrance
+                    self.entrance.step_input += metro_to_entrance
             
             # 2. Entrance flows
             entrance_total = self.entrance.resource.level
@@ -344,6 +405,7 @@ class StationSimulation:
                     # Remove from Entrance
                     yield self.entrance.resource.get(entrance_to_metro)
                     self.entrance.metrics['exits']["Metro"] += entrance_to_metro
+                    self.entrance.step_output += entrance_to_metro
                     
                     # Add to Metro (respecting capacity)
                     available_space = self.metro.resource.capacity - self.metro.resource.level
@@ -353,6 +415,7 @@ class StationSimulation:
                     if accepted > 0:
                         yield self.metro.resource.put(accepted)
                         self.metro.metrics['entries']["Entrance"] += accepted
+                        self.metro.step_input += accepted
                     
                     if rejected > 0:
                         self.metro.turned_away += rejected
@@ -363,6 +426,7 @@ class StationSimulation:
                     # Remove from Entrance
                     yield self.entrance.resource.get(entrance_to_cercanias)
                     self.entrance.metrics['exits']["Cercanias"] += entrance_to_cercanias
+                    self.entrance.step_output += entrance_to_cercanias
                     
                     # Add to Cercanias (respecting capacity)
                     available_space = self.cercanias.resource.capacity - self.cercanias.resource.level
@@ -372,6 +436,7 @@ class StationSimulation:
                     if accepted > 0:
                         yield self.cercanias.resource.put(accepted)
                         self.cercanias.metrics['entries']["Entrance"] += accepted
+                        self.cercanias.step_input += accepted
                     
                     if rejected > 0:
                         self.cercanias.turned_away += rejected
@@ -389,6 +454,7 @@ class StationSimulation:
                     # Remove from Cercanias
                     yield self.cercanias.resource.get(cercanias_to_metro)
                     self.cercanias.metrics['exits']["Metro"] += cercanias_to_metro
+                    self.cercanias.step_output += cercanias_to_metro
                     
                     # Add to Metro (respecting capacity)
                     available_space = self.metro.resource.capacity - self.metro.resource.level
@@ -398,6 +464,7 @@ class StationSimulation:
                     if accepted > 0:
                         yield self.metro.resource.put(accepted)
                         self.metro.metrics['entries']["Cercanias"] += accepted
+                        self.metro.step_input += accepted
                     
                     if rejected > 0:
                         self.metro.turned_away += rejected
@@ -408,13 +475,44 @@ class StationSimulation:
                     # Remove from Cercanias
                     yield self.cercanias.resource.get(cercanias_to_entrance)
                     self.cercanias.metrics['exits']["Entrance"] += cercanias_to_entrance
+                    self.cercanias.step_output += cercanias_to_entrance
                     
                     # Add to Entrance (no capacity limit)
                     yield self.entrance.resource.put(cercanias_to_entrance)
                     self.entrance.metrics['entries']["Cercanias"] += cercanias_to_entrance
+                    self.entrance.step_input += cercanias_to_entrance
             
             # Wait until next flow cycle
             yield self.env.timeout(STEP_INTERVAL)
+    
+    def report_flows(self):
+        """Report input, output and net flows after each step interval"""
+        while True:
+            # Wait until the next step interval
+            yield self.env.timeout(STEP_INTERVAL)
+            
+            current_hour = self.get_current_hour()
+            
+            # Skip if outside operating hours
+            if current_hour < self.time_system.start_hour or current_hour > self.time_system.end_hour:
+                continue
+                
+            formatted_time = self.time_system.format_hour(current_hour)
+            
+            print(f"\n ========== Flow Report at {formatted_time} ========== \n")
+            
+            # Report for each area
+            for area in [self.metro, self.entrance, self.cercanias]:
+                total_input = area.step_input + area.step_generated
+                total_output = area.step_output + area.step_departed
+                net_flow = total_input - total_output
+                
+                print(f"{area.name} Flows:")
+                print(f"  Input Flow: {total_input} (Internal transfers: {area.step_input}, Generated: {area.step_generated})")
+                print(f"  Output Flow: {total_output} (Internal transfers: {area.step_output}, Departed: {area.step_departed})")
+                print(f"  Net Flow: {net_flow}")
+                print(f"  Current Population: {area.resource.level}")
+                print("")
     
     def collect_metrics(self):
         """Collect metrics every hour"""
@@ -586,7 +684,8 @@ class StationSimulation:
         
         # Setup colors for different sources/destinations
         colors = {
-            'Outside': 'gray', 
+            'Generated': 'grey',
+            'Departed': 'grey', 
             'Metro': 'blue', 
             'Entrance': 'orange', 
             'Cercanias': 'green',
