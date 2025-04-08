@@ -22,10 +22,13 @@ START_HOUR = 6.0    # 6:00 AM
 END_HOUR = 25.5     # 1:30 AM (next day)
 
 # Time distribution parameters
-PEAK_HOUR = 17.0    # 5:00 PM
-SKEW_PARAM = 5      # Controls skewness, positive for right-skew
-SCALE_PARAM = 3.0   # Scale parameter (spread of distribution)
-# IN THE NOTEBOOK LETS VISUALIZE THIS DISTRIBUTION AND COMPARE W GOOGLE MAPS
+PEAK_HOUR_1 = 7.0    # 5:00 PM
+SKEW_PARAM_1 = 4   # Controls skewness, positive for right-skew
+SCALE_PARAM_1 = 4.0   # Scale parameter (spread of distribution)
+
+PEAK_HOUR_2 = 18.0    # 5:00 PM
+SKEW_PARAM_2 = -0.9    # Controls skewness, positive for right-skew
+SCALE_PARAM_2 = 3.0   # Scale parameter (spread of distribution)
 
 # Flow probabilities between areas
 # From Metro
@@ -61,18 +64,25 @@ PLOT_TARGET_HOURS = [6.0, 9.0, 12.0, 15.0, 18.0, 21.0, 24.0, 25.5]  # Hours to a
 
 class TimeOfDay:
     """Models time of day and provides factors to adjust flow rates"""
-    def __init__(self, start_hour=START_HOUR, end_hour=END_HOUR, peak_hour=PEAK_HOUR, 
-                 skew_param=SKEW_PARAM, scale_param=SCALE_PARAM):
+    def __init__(self, start_hour=START_HOUR, end_hour=END_HOUR, peak_hour_1=PEAK_HOUR_1, 
+                 skew_param_1=SKEW_PARAM_1, scale_param_1=SCALE_PARAM_1, peak_hour_2=PEAK_HOUR_2, 
+                 skew_param_2=SKEW_PARAM_2, scale_param_2=SCALE_PARAM_2):
         self.start_hour = start_hour
         self.end_hour = end_hour
-        self.peak_hour = peak_hour
+        self.peak_hour_1 = peak_hour_1
+        self.peak_hour_2 = peak_hour_2
         self.operating_hours = end_hour - start_hour
-        self.skew_param = skew_param
-        self.scale_param = scale_param
+        self.skew_param_1 = skew_param_1
+        self.scale_param_1 = scale_param_1
+        self.skew_param_2 = skew_param_2
+        self.scale_param_2 = scale_param_2
         
         # Cached distribution values
         self._cached_x = np.linspace(0, 1, 1000)
-        pdf = stats.skewnorm.pdf(self._cached_x, skew_param, loc=peak_hour/24, scale=scale_param/24)
+        pdf1 = stats.skewnorm.pdf(self._cached_x, a=self.skew_param_1, loc=self.peak_hour_1/24, scale=self.scale_param_1/24)
+        pdf2 = stats.skewnorm.pdf(self._cached_x, a=self.skew_param_2, loc=self.peak_hour_2/24, scale=self.scale_param_2/24)
+        pdf = 0.4 * pdf1 + 0.6 * pdf2
+
         self._cached_pdf = pdf / pdf.max()  # Normalize to max 1.0
     
     def get_time_factor(self, hour):
@@ -222,14 +232,16 @@ class StationSimulation:
             env.process(self.generate_people(self.metro)),
             env.process(self.generate_people(self.entrance)),
             env.process(self.generate_people(self.cercanias)),
+
+            # Internal people flows
+            env.process(self.flow_between_areas()),
             
             # Internal departures from each area
             env.process(self.remove_people(self.metro)),
             env.process(self.remove_people(self.entrance)),
             env.process(self.remove_people(self.cercanias)),
             
-            # Internal people flows
-            env.process(self.flow_between_areas()),
+
             
             # Metrics collection
             env.process(self.collect_metrics()),
