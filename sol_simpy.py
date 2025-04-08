@@ -14,7 +14,7 @@ INITIAL_PEOPLE_METRO = 100
 INITIAL_PEOPLE_CERCANIAS = 100
 
 # Capacity limits
-METRO_CAPACITY = 2000
+METRO_CAPACITY = 1000
 CERCANIAS_CAPACITY = 750
 
 # Operating hours
@@ -22,38 +22,39 @@ START_HOUR = 6.0    # 6:00 AM
 END_HOUR = 25.5     # 1:30 AM (next day)
 
 # Time distribution parameters
-PEAK_HOUR_1 = 7.0    # 5:00 PM
+PEAK_HOUR_1 = 7.0    # 7:00 AM - Morning peak
 SKEW_PARAM_1 = 4   # Controls skewness, positive for right-skew
 SCALE_PARAM_1 = 4.0   # Scale parameter (spread of distribution)
 
-PEAK_HOUR_2 = 18.0    # 5:00 PM
-SKEW_PARAM_2 = -0.9    # Controls skewness, positive for right-skew
+PEAK_HOUR_2 = 18.0    # 6:00 PM - Evening peak
+SKEW_PARAM_2 = -0.9    # Controls skewness, negative for left-skew
 SCALE_PARAM_2 = 3.0   # Scale parameter (spread of distribution)
 
 # Flow probabilities between areas
 # From Metro
-METRO_TO_METRO_PROB = 0.45
-METRO_TO_CERCANIAS_PROB = 0.25
-METRO_TO_ENTRANCE_PROB = 0.30
+METRO_TO_METRO_PROB = 0.45     # Stay in Metro
+METRO_TO_CERCANIAS_PROB = 0.25  # Go to Cercanias
+METRO_TO_ENTRANCE_PROB = 0.30   # Go to Entrance
 
 # From Entrance
-ENTRANCE_TO_ENTRANCE_PROB = 0.03
-ENTRANCE_TO_METRO_PROB = 0.776
-ENTRANCE_TO_CERCANIAS_PROB = 0.194
+ENTRANCE_TO_ENTRANCE_PROB = 0.05   # Stay in Entrance
+ENTRANCE_TO_METRO_PROB = 0.60     # Go to Metro
+ENTRANCE_TO_CERCANIAS_PROB = 0.35 # Go to Cercanias
 
 # From Cercanias
-CERCANIAS_TO_CERCANIAS_PROB = 0.02
-CERCANIAS_TO_METRO_PROB = 0.588
-CERCANIAS_TO_ENTRANCE_PROB = 0.392
+CERCANIAS_TO_CERCANIAS_PROB = 0.02    # Stay in Cercanias
+CERCANIAS_TO_METRO_PROB = 0.588       # Go to Metro
+CERCANIAS_TO_ENTRANCE_PROB = 0.392    # Go to Entrance
 
-# Generation and departure rates for each area (people per hour)
+# Generation rates for each area (people per hour)
 METRO_GENERATION_RATE = 40      # People generated directly in Metro
 ENTRANCE_GENERATION_RATE = 30   # People generated directly in Entrance
 CERCANIAS_GENERATION_RATE = 35  # People generated directly in Cercanias
 
-METRO_DEPARTURE_RATE = 35       # People leaving from Metro
-ENTRANCE_DEPARTURE_RATE = 25    # People leaving from Entrance  
-CERCANIAS_DEPARTURE_RATE = 30   # People leaving from Cercanias
+# Departure rates (% of people who leave the system per hour)
+METRO_DEPARTURE_RATE = 0.50       # 10% of Metro population leaves per hour
+ENTRANCE_DEPARTURE_RATE = 0.50    # 15% of Entrance population leaves per hour  
+CERCANIAS_DEPARTURE_RATE = 0.50   # 10% of Cercanias population leaves per hour
 
 # Simulation time step (in minutes)
 STEP_INTERVAL = 10  # Minutes between each flow calculation
@@ -191,12 +192,12 @@ class Cercanias(StationArea):
 
 class Person:
     """Represents a person moving through the station"""
-    def __init__(self, env, id, source="Generated"):
+    def __init__(self, env, id, source="Generated", destination=None):
         self.env = env
         self.id = id
         self.entry_time = env.now
         self.source = source
-        self.destination = None
+        self.destination = destination
         self.current_area = None
         self.wait_start = None
         
@@ -228,26 +229,19 @@ class StationSimulation:
         
         # Start processes
         self.processes = [
-            # Internal generation within each area
-            env.process(self.generate_people(self.metro)),
-            env.process(self.generate_people(self.entrance)),
-            env.process(self.generate_people(self.cercanias)),
-
-            # Internal people flows
-            env.process(self.flow_between_areas()),
+            # Generate and route people
+            env.process(self.generate_and_route_people(self.metro)),
+            env.process(self.generate_and_route_people(self.entrance)),
+            env.process(self.generate_and_route_people(self.cercanias)),
             
-            # Internal departures from each area
-            env.process(self.remove_people(self.metro)),
-            env.process(self.remove_people(self.entrance)),
-            env.process(self.remove_people(self.cercanias)),
-            
-
+            # Process departures from system
+            env.process(self.process_departures(self.metro)),
+            env.process(self.process_departures(self.entrance)),
+            env.process(self.process_departures(self.cercanias)),
             
             # Metrics collection
             env.process(self.collect_metrics()),
             env.process(self.display_status()),
-            
-            # Debug flow reporting
             env.process(self.report_flows())
         ]
         
@@ -266,10 +260,82 @@ class StationSimulation:
         current_hour = self.get_current_hour()
         return self.time_system.get_time_factor(current_hour)
     
-    def generate_people(self, area):
-        """Generate people directly within an area"""
+    def get_destination(self, source_area):
+        """Determine destination based on probabilities for the given source area"""
+        r = random.random()
+        
+        if source_area.name == "Metro":
+            if r < METRO_TO_METRO_PROB:
+                return "Metro"
+            elif r < METRO_TO_METRO_PROB + METRO_TO_CERCANIAS_PROB:
+                return "Cercanias"
+            else:
+                return "Entrance"
+        
+        elif source_area.name == "Entrance":
+            if r < ENTRANCE_TO_ENTRANCE_PROB:
+                return "Entrance"
+            elif r < ENTRANCE_TO_ENTRANCE_PROB + ENTRANCE_TO_METRO_PROB:
+                return "Metro"
+            else:
+                return "Cercanias"
+        
+        elif source_area.name == "Cercanias":
+            if r < CERCANIAS_TO_CERCANIAS_PROB:
+                return "Cercanias"
+            elif r < CERCANIAS_TO_CERCANIAS_PROB + CERCANIAS_TO_METRO_PROB:
+                return "Metro"
+            else:
+                return "Entrance"
+        
+        return None
+    
+    def get_area_by_name(self, name):
+        """Get area object by name"""
+        if name == "Metro":
+            return self.metro
+        elif name == "Entrance":
+            return self.entrance
+        elif name == "Cercanias":
+            return self.cercanias
+        return None
+    
+    def transfer_person(self, source_area, destination_name):
+        """Transfer a person from source area to destination area"""
+        # Get destination area
+        destination_area = self.get_area_by_name(destination_name)
+        
+        if destination_area is None or source_area.name == destination_area.name:
+            return True  # No transfer needed or invalid destination
+        
+        # Check if there's space in the destination
+        if destination_area.resource.level >= destination_area.resource.capacity:
+            # Destination is full, person can't transfer
+            source_area.turned_away += 1
+            source_area.metrics['rejected'][destination_area.name] += 1
+            # print(f"Person couldn't transfer from {source_area.name} to {destination_area.name} - destination full")
+            return False
+        
+        # Remove from source
+        yield source_area.resource.get(1)
+        source_area.metrics['exits'][destination_area.name] += 1
+        source_area.step_output += 1
+        
+        # Add to destination
+        yield destination_area.resource.put(1)
+        destination_area.metrics['entries'][source_area.name] += 1
+        destination_area.step_input += 1
+        
+        # print(f"Person transferred from {source_area.name} to {destination_area.name}")
+        return True
+    
+    def generate_and_route_people(self, area):
+        """Generate people in an area and immediately route them to their destinations"""
         while True:
             current_hour = self.get_current_hour()
+            
+            # Reset step metrics
+            area.reset_step_metrics()
             
             # Skip if outside operating hours
             if current_hour < self.time_system.start_hour or current_hour > self.time_system.end_hour:
@@ -282,41 +348,61 @@ class StationSimulation:
             adjusted_rate = max(adjusted_rate, area.generation_rate * 0.2)
             
             # Scale down for the step interval (rate is per hour)
-            step_rate = adjusted_rate * (STEP_INTERVAL / 60.0)
+            step_rate = adjusted_rate * (STEP_INTERVAL / 6)
             
             # Generate random number of people
             to_generate = random.randint(int(0.7 * step_rate), int(1.3 * step_rate))
             
-            # Process arrivals based on capacity
-            available_space = area.resource.capacity - area.resource.level
-            accepted = min(to_generate, available_space) if area.resource.capacity < float('inf') else to_generate
-            rejected = to_generate - accepted
+            print(f"Generating {to_generate} people in {area.name}")
             
-            if accepted > 0:
-                # Create people and add them to the area
-                for _ in range(accepted):
-                    person = Person(self.env, self.person_count, f"Generated in {area.name}")
-                    self.person_count += 1
+            # Create and route each person individually
+            for _ in range(to_generate):
+                # Create a new person
+                self.person_count += 1
+                destination = self.get_destination(area)
+                person = Person(self.env, self.person_count, f"Generated in {area.name}", destination)
                 
-                # Add people to the area
-                yield area.resource.put(accepted)
+                # Record generation
+                area.step_generated += 1
                 
-                # Record metrics
-                area.step_generated += accepted
-                area.metrics['entries']["Generated"] += accepted
-                
-                print(f"Generated {accepted} people directly in {area.name}")
-                
-            if rejected > 0:
-                area.turned_away += rejected
-                area.metrics['rejected']["Generated"] += rejected
-                print(f"Rejected {rejected} generated people due to capacity in {area.name}")
-                
+                # If destination is the same as current area, just add them directly
+                if destination == area.name:
+                    # Check if there's enough capacity
+                    if area.resource.level < area.resource.capacity:
+                        yield area.resource.put(1)
+                        area.metrics['entries']["Generated"] += 1
+                        # print(f"Person {self.person_count} stays in {area.name}")
+                    else:
+                        area.turned_away += 1
+                        area.metrics['rejected']["Generated"] += 1
+                        # print(f"Person {self.person_count} rejected from {area.name} - no capacity")
+                else:
+                    # Transfer to the destination area
+                    dest_area = self.get_area_by_name(destination)
+                    
+                    # Check if there's enough capacity in destination
+                    if dest_area.resource.level < dest_area.resource.capacity:
+                        # Add to destination
+                        yield dest_area.resource.put(1)
+                        dest_area.metrics['entries'][area.name] += 1
+                        dest_area.step_input += 1
+                        
+                        # Record the transfer
+                        area.metrics['exits'][destination] += 1
+                        area.step_output += 1
+                        
+                        # print(f"Person {self.person_count} directly routed from {area.name} to {destination}")
+                    else:
+                        # Destination full, person couldn't be routed
+                        dest_area.turned_away += 1
+                        dest_area.metrics['rejected'][area.name] += 1
+                        # print(f"Person {self.person_count} rejected - {destination} is full")
+            
             # Wait until next generation cycle
             yield self.env.timeout(STEP_INTERVAL)
     
-    def remove_people(self, area):
-        """Remove people directly from an area (they leave the system)"""
+    def process_departures(self, area):
+        """Process departures from the system from each area"""
         while True:
             current_hour = self.get_current_hour()
             
@@ -325,16 +411,19 @@ class StationSimulation:
                 yield self.env.timeout(STEP_INTERVAL)
                 continue
             
-            # Calculate departure rate based on time of day
+            # Calculate departure rate based on time of day and current population
             time_factor = self.time_system.get_time_factor(current_hour)
-            adjusted_rate = area.departure_rate * time_factor * 3.0
-            adjusted_rate = max(adjusted_rate, area.departure_rate * 0.2)
+            
+            # The departure rate is a percentage of current population
+            base_departures = area.resource.level * area.departure_rate
+            adjusted_rate = base_departures * time_factor * 1.5
+            adjusted_rate = max(adjusted_rate, base_departures * 0.5)
             
             # Scale down for the step interval (rate is per hour)
             step_rate = adjusted_rate * (STEP_INTERVAL / 60.0)
             
-            # Generate random number of departures (capped by current population)
-            to_depart = min(random.randint(int(0.7 * step_rate), int(1.3 * step_rate)), 
+            # Calculate number of departures (capped by current population)
+            to_depart = min(random.randint(int(0.7 * step_rate), int(1.3 * step_rate) + 1), 
                           area.resource.level)
             
             if to_depart > 0:
@@ -348,153 +437,6 @@ class StationSimulation:
                 print(f"{to_depart} people departed from {area.name}")
             
             # Wait until next departure cycle
-            yield self.env.timeout(STEP_INTERVAL)
-    
-    def flow_between_areas(self):
-        """Handle the flow of people between different areas of the station"""
-        while True:
-            current_hour = self.get_current_hour()
-            
-            # Reset step metrics
-            for area in [self.metro, self.entrance, self.cercanias]:
-                area.reset_step_metrics()
-            
-            # Skip if outside operating hours
-            if current_hour < self.time_system.start_hour or current_hour > self.time_system.end_hour:
-                yield self.env.timeout(STEP_INTERVAL)
-                continue
-            
-            # 1. Metro flows
-            metro_total = self.metro.resource.level
-            if metro_total > 0:
-                # Calculate how many people move to each destination
-                metro_to_cercanias = int(metro_total * METRO_TO_CERCANIAS_PROB)
-                metro_to_entrance = int(metro_total * METRO_TO_ENTRANCE_PROB)
-                # Staying in metro is calculated but not needed for movement
-                
-                # Process Metro → Cercanias
-                if metro_to_cercanias > 0:
-                    # Remove from Metro
-                    yield self.metro.resource.get(metro_to_cercanias)
-                    self.metro.metrics['exits']["Cercanias"] += metro_to_cercanias
-                    self.metro.step_output += metro_to_cercanias
-                    
-                    # Add to Cercanias (respecting capacity)
-                    available_space = self.cercanias.resource.capacity - self.cercanias.resource.level
-                    accepted = min(metro_to_cercanias, available_space)
-                    rejected = metro_to_cercanias - accepted
-                    
-                    if accepted > 0:
-                        yield self.cercanias.resource.put(accepted)
-                        self.cercanias.metrics['entries']["Metro"] += accepted
-                        self.cercanias.step_input += accepted
-                    
-                    if rejected > 0:
-                        self.cercanias.turned_away += rejected
-                        self.cercanias.metrics['rejected']["Metro"] += rejected
-                
-                # Process Metro → Entrance
-                if metro_to_entrance > 0:
-                    # Remove from Metro
-                    yield self.metro.resource.get(metro_to_entrance)
-                    self.metro.metrics['exits']["Entrance"] += metro_to_entrance
-                    self.metro.step_output += metro_to_entrance
-                    
-                    # Add to Entrance (no capacity limit)
-                    yield self.entrance.resource.put(metro_to_entrance)
-                    self.entrance.metrics['entries']["Metro"] += metro_to_entrance
-                    self.entrance.step_input += metro_to_entrance
-            
-            # 2. Entrance flows
-            entrance_total = self.entrance.resource.level
-            if entrance_total > 0:
-                # Calculate how many people move to each destination
-                entrance_to_metro = int(entrance_total * ENTRANCE_TO_METRO_PROB)
-                entrance_to_cercanias = int(entrance_total * ENTRANCE_TO_CERCANIAS_PROB)
-                
-                # Process Entrance → Metro
-                if entrance_to_metro > 0:
-                    # Remove from Entrance
-                    yield self.entrance.resource.get(entrance_to_metro)
-                    self.entrance.metrics['exits']["Metro"] += entrance_to_metro
-                    self.entrance.step_output += entrance_to_metro
-                    
-                    # Add to Metro (respecting capacity)
-                    available_space = self.metro.resource.capacity - self.metro.resource.level
-                    accepted = min(entrance_to_metro, available_space)
-                    rejected = entrance_to_metro - accepted
-                    
-                    if accepted > 0:
-                        yield self.metro.resource.put(accepted)
-                        self.metro.metrics['entries']["Entrance"] += accepted
-                        self.metro.step_input += accepted
-                    
-                    if rejected > 0:
-                        self.metro.turned_away += rejected
-                        self.metro.metrics['rejected']["Entrance"] += rejected
-                
-                # Process Entrance → Cercanias
-                if entrance_to_cercanias > 0:
-                    # Remove from Entrance
-                    yield self.entrance.resource.get(entrance_to_cercanias)
-                    self.entrance.metrics['exits']["Cercanias"] += entrance_to_cercanias
-                    self.entrance.step_output += entrance_to_cercanias
-                    
-                    # Add to Cercanias (respecting capacity)
-                    available_space = self.cercanias.resource.capacity - self.cercanias.resource.level
-                    accepted = min(entrance_to_cercanias, available_space)
-                    rejected = entrance_to_cercanias - accepted
-                    
-                    if accepted > 0:
-                        yield self.cercanias.resource.put(accepted)
-                        self.cercanias.metrics['entries']["Entrance"] += accepted
-                        self.cercanias.step_input += accepted
-                    
-                    if rejected > 0:
-                        self.cercanias.turned_away += rejected
-                        self.cercanias.metrics['rejected']["Entrance"] += rejected
-            
-            # 3. Cercanias flows
-            cercanias_total = self.cercanias.resource.level
-            if cercanias_total > 0:
-                # Calculate how many people move to each destination
-                cercanias_to_metro = int(cercanias_total * CERCANIAS_TO_METRO_PROB)
-                cercanias_to_entrance = int(cercanias_total * CERCANIAS_TO_ENTRANCE_PROB)
-                
-                # Process Cercanias → Metro
-                if cercanias_to_metro > 0:
-                    # Remove from Cercanias
-                    yield self.cercanias.resource.get(cercanias_to_metro)
-                    self.cercanias.metrics['exits']["Metro"] += cercanias_to_metro
-                    self.cercanias.step_output += cercanias_to_metro
-                    
-                    # Add to Metro (respecting capacity)
-                    available_space = self.metro.resource.capacity - self.metro.resource.level
-                    accepted = min(cercanias_to_metro, available_space)
-                    rejected = cercanias_to_metro - accepted
-                    
-                    if accepted > 0:
-                        yield self.metro.resource.put(accepted)
-                        self.metro.metrics['entries']["Cercanias"] += accepted
-                        self.metro.step_input += accepted
-                    
-                    if rejected > 0:
-                        self.metro.turned_away += rejected
-                        self.metro.metrics['rejected']["Cercanias"] += rejected
-                
-                # Process Cercanias → Entrance
-                if cercanias_to_entrance > 0:
-                    # Remove from Cercanias
-                    yield self.cercanias.resource.get(cercanias_to_entrance)
-                    self.cercanias.metrics['exits']["Entrance"] += cercanias_to_entrance
-                    self.cercanias.step_output += cercanias_to_entrance
-                    
-                    # Add to Entrance (no capacity limit)
-                    yield self.entrance.resource.put(cercanias_to_entrance)
-                    self.entrance.metrics['entries']["Cercanias"] += cercanias_to_entrance
-                    self.entrance.step_input += cercanias_to_entrance
-            
-            # Wait until next flow cycle
             yield self.env.timeout(STEP_INTERVAL)
     
     def report_flows(self):
@@ -620,8 +562,10 @@ class StationSimulation:
         plt.show()
         
         # Create plot for waiting times if available
-        if any(len(area.queue_times) > 0 for area in [self.metro, self.entrance, self.cercanias]):
-            self.plot_waiting_times()
+        # if any(len(area.queue_times) > 0 for area in [self.metro, self.entrance, self.cercanias]):
+        #     self.plot_waiting_times()
+        self.plot_waiting_times()
+
         
         # Create flow analysis charts
         self.plot_flow_charts()
@@ -634,6 +578,7 @@ class StationSimulation:
         # Extract waiting time data
         areas = ["Metro", "Entrance", "Cercanias"]
         wait_data = []
+        print(self.hourly_data)
         
         for i, data in enumerate(self.hourly_data):
             wait_data.append({
