@@ -105,6 +105,7 @@ class Area:
         self.utilization_data = []
         self.people_data = []
         self.generation_data = 0
+        self.abandoned_due_to_queue = 0  # Count people who leave due to long queues
         
         # Start the arrival process
         if self.arrival_rate > 0:
@@ -142,6 +143,25 @@ class Area:
         queue_len = len(self.server.queue) + 1
         self.queue_length.append(queue_len)
         
+        # Check if queue is too long (> 100 people)
+        if queue_len > 100 and random.random() < 0.2:  # 20% chance of leaving if queue > 100
+            # Person decides to leave the station instead of waiting
+            self.abandoned_due_to_queue += 1
+            self.people_count -= 1
+            
+            # If not already in entrance, go to entrance to leave
+            if self.name != "Entrance":
+                person.current_area = "Entrance"
+                person.leaving = True
+                self.station.entrance.people_count += 1
+                self.env.process(self.station.entrance.serve_person(person))
+            else:
+                # If already at entrance, exit directly
+                self.station.sink.enter(person)
+            
+            # End this process
+            return
+        
         # Request service
         with self.server.request() as request:
             yield request
@@ -173,15 +193,19 @@ class Area:
         while True:
             yield self.env.timeout(STEP_INTERVAL)
             
-            # Record utilization (busy servers / total servers)
+            # Calculate true utilization, which can exceed 100% if queue is building up
             current_hour = self.env.now / 60
-            utilization = self.server.count / self.server.capacity
-            self.utilization_data.append((current_hour, utilization))
+            
+            # Utilization = (servers busy + people in queue) / total servers
+            # This can exceed 100% if the queue is long
+            queue_size = len(self.server.queue) 
+            busy_servers = self.server.count
+            total_utilization = (busy_servers + queue_size) / self.server.capacity * 100
+            
+            self.utilization_data.append((current_hour, total_utilization))
             
             # Record people count
             self.people_data.append((current_hour, self.people_count))
-            # self.generation_data.append((self.name, self.people_count))
-            # print(f"People in {self.name} at hour {current_hour}: {self.people_count}")
 
 class Metro(Area):
     def __init__(self, env, station):
@@ -342,26 +366,39 @@ class StationSimulation:
         metrics['avg_wait_time_cercanias'] = np.mean(self.cercanias.queue_times) if self.cercanias.queue_times else 0
         metrics['avg_wait_time_entrance'] = np.mean(self.entrance.queue_times) if self.entrance.queue_times else 0
         
-        # Server utilization calculation
-        total_time = self.env.now
-        metro_busy_time = sum(self.metro.server.count for _ in range(len(self.metro.utilization_data))) / len(self.metro.utilization_data) if self.metro.utilization_data else 0
-        cercanias_busy_time = sum(self.cercanias.server.count for _ in range(len(self.cercanias.utilization_data))) / len(self.cercanias.utilization_data) if self.cercanias.utilization_data else 0
-        entrance_busy_time = sum(self.entrance.server.count for _ in range(len(self.entrance.utilization_data))) / len(self.entrance.utilization_data) if self.entrance.utilization_data else 0
-        
-        metrics['utilization_metro'] = metro_busy_time / self.metro.server.capacity if self.metro.server.capacity > 0 else 0
-        metrics['utilization_cercanias'] = cercanias_busy_time / self.cercanias.server.capacity if self.cercanias.server.capacity > 0 else 0
-        metrics['utilization_entrance'] = entrance_busy_time / self.entrance.server.capacity if self.entrance.server.capacity > 0 else 0
+        # Server utilization calculation - now can exceed 100%
+        if self.metro.utilization_data:
+            metrics['utilization_metro'] = np.mean([u[1] for u in self.metro.utilization_data]) / 100
+        else:
+            metrics['utilization_metro'] = 0
+            
+        if self.cercanias.utilization_data:
+            metrics['utilization_cercanias'] = np.mean([u[1] for u in self.cercanias.utilization_data]) / 100
+        else:
+            metrics['utilization_cercanias'] = 0
+            
+        if self.entrance.utilization_data:
+            metrics['utilization_entrance'] = np.mean([u[1] for u in self.entrance.utilization_data]) / 100
+        else:
+            metrics['utilization_entrance'] = 0
         
         # Total counts
         metrics['total_served_metro'] = self.metro.served_count
         metrics['total_served_cercanias'] = self.cercanias.served_count
         metrics['total_served_entrance'] = self.entrance.served_count
         metrics['total_exits'] = self.sink.departed
-
+        
         metrics['total_generated_metro'] = self.metro.generation_data
         metrics['total_generated_cercanias'] = self.cercanias.generation_data
         metrics['total_generated_entrance'] = self.entrance.generation_data
-
+        
+        # People who abandoned due to long queues
+        metrics['abandoned_metro'] = self.metro.abandoned_due_to_queue
+        metrics['abandoned_cercanias'] = self.cercanias.abandoned_due_to_queue
+        metrics['abandoned_entrance'] = self.entrance.abandoned_due_to_queue
+        metrics['total_abandoned'] = (self.metro.abandoned_due_to_queue + 
+                                     self.cercanias.abandoned_due_to_queue + 
+                                     self.entrance.abandoned_due_to_queue)
         
         return metrics
     
@@ -372,9 +409,11 @@ class StationSimulation:
         # Convert hourly data to DataFrame
         df = pd.DataFrame.from_dict(self.hourly_data, orient='index')
         
+        # Create a figure with multiple subplots
+        plt.figure(figsize=(16, 20))
+        
         # Plot 1: People count per area over time
-        plt.figure(figsize=(12, 8))
-        plt.subplot(2, 2, 1)
+        plt.subplot(4, 2, 1)
         plt.plot(df.index, df.metro_count, label='Metro')
         plt.plot(df.index, df.cercanias_count, label='Cercanias')
         plt.plot(df.index, df.entrance_count, label='Entrance')
@@ -385,24 +424,31 @@ class StationSimulation:
         plt.legend()
         plt.grid(True)
         
-        # Plot 2: Server utilization
-        plt.subplot(2, 2, 2)
+        # Plot 2: Server utilization (can now exceed 100%)
+        plt.subplot(4, 2, 2)
         utilization_data = {
-            'Metro': metrics['utilization_metro'],
-            'Cercanias': metrics['utilization_cercanias'],
-            'Entrance': metrics['utilization_entrance']
+            'Metro': metrics['utilization_metro'] * 100,  # Convert back to percentage
+            'Cercanias': metrics['utilization_cercanias'] * 100,
+            'Entrance': metrics['utilization_entrance'] * 100
         }
         areas = list(utilization_data.keys())
         values = list(utilization_data.values())
-        max_val = max(metrics['utilization_metro'], metrics['utilization_cercanias'], metrics['utilization_entrance'])
-        plt.bar(areas, values)
+        bars = plt.bar(areas, values)
         plt.title('Server Utilization')
         plt.xlabel('Area')
-        plt.ylabel('Utilization')
-        plt.ylim(0, max_val)
+        plt.ylabel('Utilization (%)')
+
+        for bar in bars:
+            yval = bar.get_height()
+            plt.text(bar.get_x() + bar.get_width()/2, yval + 2, f'{yval:.1f}%', ha='center', va='bottom')
+        
+        # Add a dashed line at 100%
+        plt.axhline(y=100, color='r', linestyle='--', label='100% capacity')
+        plt.legend()
+        plt.grid(True)
         
         # Plot 3: Average queue length
-        plt.subplot(2, 2, 3)
+        plt.subplot(4, 2, 3)
         queue_length_data = {
             'Metro': metrics['avg_queue_length_metro'],
             'Cercanias': metrics['avg_queue_length_cercanias'],
@@ -414,9 +460,11 @@ class StationSimulation:
         plt.title('Average Queue Length')
         plt.xlabel('Area')
         plt.ylabel('People')
+        plt.grid(True)
+
         
         # Plot 4: Average waiting time
-        plt.subplot(2, 2, 4)
+        plt.subplot(4, 2, 4)
         wait_time_data = {
             'Metro': metrics['avg_wait_time_metro'],
             'Cercanias': metrics['avg_wait_time_cercanias'],
@@ -428,9 +476,266 @@ class StationSimulation:
         plt.title('Average Wait Time')
         plt.xlabel('Area')
         plt.ylabel('Minutes')
+        plt.grid(True)
+
+        
+        # Plot 5: Total served vs generated per area
+        plt.subplot(4, 2, 5)
+        areas = ['Metro', 'Cercanias', 'Entrance']
+        served_values = [metrics['total_served_metro'], metrics['total_served_cercanias'], metrics['total_served_entrance']]
+        generated_values = [metrics['total_generated_metro'], metrics['total_generated_cercanias'], metrics['total_generated_entrance']]
+        
+        # Set width of bars
+        barWidth = 0.3
+        
+        # Set position of bars on X axis
+        r1 = np.arange(len(areas))
+        r2 = [x + barWidth for x in r1]
+        
+        # Create bars
+        plt.bar(r1, generated_values, width=barWidth, label='Generated', color='skyblue')
+        plt.bar(r2, served_values, width=barWidth, label='Served', color='lightgreen')
+        
+        # Add labels and legend
+        plt.xlabel('Area')
+        plt.ylabel('Count')
+        plt.title('Total People Generated vs Served')
+        plt.xticks([r + barWidth/2 for r in range(len(areas))], areas)
+        plt.legend()
+        plt.grid(True)
+        
+        # Plot 6: Queue length distribution over time for Metro
+        plt.subplot(4, 2, 6)
+        # Create data for heatmap-style visualization
+        if len(self.metro.queue_length) > 1:
+            # Group queue lengths by hour
+            queue_by_hour = {}
+            for i, q_len in enumerate(self.metro.queue_length):
+                arrival_time = i / len(self.metro.queue_length) * self.env.now / 60  # Approximate arrival hour
+                hour = int(arrival_time)
+                if hour not in queue_by_hour:
+                    queue_by_hour[hour] = []
+                queue_by_hour[hour].append(q_len)
+            
+            # Calculate statistics per hour
+            hours = sorted(queue_by_hour.keys())
+            metro_means = [np.mean(queue_by_hour[h]) for h in hours]
+            metro_maxes = [np.max(queue_by_hour[h]) for h in hours]
+            metro_mins = [np.min(queue_by_hour[h]) for h in hours]
+            
+            plt.fill_between(hours, metro_mins, metro_maxes, alpha=0.3, color='blue')
+            plt.plot(hours, metro_means, 'b-', label='Mean')
+            plt.plot(hours, metro_maxes, 'b--', label='Max')
+            plt.plot(hours, metro_mins, 'b:', label='Min')
+            plt.title('Metro Queue Length by Hour')
+            plt.xlabel('Hour')
+            plt.ylabel('Queue Length')
+            plt.legend()
+            plt.grid(True)
+
+        else:
+            plt.text(0.5, 0.5, 'Insufficient data for Metro queue distribution', 
+                    horizontalalignment='center', verticalalignment='center', transform=plt.gca().transAxes)
+        
+        # Plot 7: Queue length distribution over time for Cercanias
+        plt.subplot(4, 2, 7)
+        if len(self.cercanias.queue_length) > 1:
+            # Group queue lengths by hour
+            queue_by_hour = {}
+            for i, q_len in enumerate(self.cercanias.queue_length):
+                arrival_time = i / len(self.cercanias.queue_length) * self.env.now / 60  # Approximate arrival hour
+                hour = int(arrival_time)
+                if hour not in queue_by_hour:
+                    queue_by_hour[hour] = []
+                queue_by_hour[hour].append(q_len)
+            
+            # Calculate statistics per hour
+            hours = sorted(queue_by_hour.keys())
+            cercanias_means = [np.mean(queue_by_hour[h]) for h in hours]
+            cercanias_maxes = [np.max(queue_by_hour[h]) for h in hours]
+            cercanias_mins = [np.min(queue_by_hour[h]) for h in hours]
+            
+            plt.fill_between(hours, cercanias_mins, cercanias_maxes, alpha=0.3, color='green')
+            plt.plot(hours, cercanias_means, 'g-', label='Mean')
+            plt.plot(hours, cercanias_maxes, 'g--', label='Max')
+            plt.plot(hours, cercanias_mins, 'g:', label='Min')
+            plt.title('Cercanias Queue Length by Hour')
+            plt.xlabel('Hour')
+            plt.ylabel('Queue Length')
+            plt.legend()
+            plt.grid(True)
+
+        else:
+            plt.text(0.5, 0.5, 'Insufficient data for Cercanias queue distribution', 
+                    horizontalalignment='center', verticalalignment='center', transform=plt.gca().transAxes)
+        
+        # Plot 8: Queue length distribution over time for Entrance
+        plt.subplot(4, 2, 8)
+        if len(self.entrance.queue_length) > 1:
+            # Group queue lengths by hour
+            queue_by_hour = {}
+            for i, q_len in enumerate(self.entrance.queue_length):
+                arrival_time = i / len(self.entrance.queue_length) * self.env.now / 60  # Approximate arrival hour
+                hour = int(arrival_time)
+                if hour not in queue_by_hour:
+                    queue_by_hour[hour] = []
+                queue_by_hour[hour].append(q_len)
+            
+            # Calculate statistics per hour
+            hours = sorted(queue_by_hour.keys())
+            entrance_means = [np.mean(queue_by_hour[h]) for h in hours]
+            entrance_maxes = [np.max(queue_by_hour[h]) for h in hours]
+            entrance_mins = [np.min(queue_by_hour[h]) for h in hours]
+            
+            plt.fill_between(hours, entrance_mins, entrance_maxes, alpha=0.3, color='red')
+            plt.plot(hours, entrance_means, 'r-', label='Mean')
+            plt.plot(hours, entrance_maxes, 'r--', label='Max')
+            plt.plot(hours, entrance_mins, 'r:', label='Min')
+            plt.title('Entrance Queue Length by Hour')
+            plt.xlabel('Hour')
+            plt.ylabel('Queue Length')
+            plt.legend()
+            plt.grid(True)
+
+        else:
+            plt.text(0.5, 0.5, 'Insufficient data for Entrance queue distribution', 
+                    horizontalalignment='center', verticalalignment='center', transform=plt.gca().transAxes)
         
         plt.tight_layout()
         plt.savefig('station_simulation_results.png')
+        
+        # Create a second figure for wait time distributions
+        plt.figure(figsize=(15, 10))
+        
+        # Plot 1: Wait time distribution for Metro
+        plt.subplot(2, 2, 1)
+        if len(self.metro.queue_times) > 1:
+            # Group wait times by hour
+            wait_by_hour = {}
+            for i, wait_time in enumerate(self.metro.queue_times):
+                # Approximate the hour based on index position
+                arrival_time = i / len(self.metro.queue_times) * self.env.now / 60
+                hour = int(arrival_time)
+                if hour not in wait_by_hour:
+                    wait_by_hour[hour] = []
+                wait_by_hour[hour].append(wait_time)
+            
+            # Calculate statistics per hour
+            hours = sorted(wait_by_hour.keys())
+            metro_means = [np.mean(wait_by_hour[h]) for h in hours]
+            metro_maxes = [np.max(wait_by_hour[h]) for h in hours]
+            metro_mins = [np.min(wait_by_hour[h]) for h in hours]
+            
+            plt.fill_between(hours, metro_mins, metro_maxes, alpha=0.3, color='blue')
+            plt.plot(hours, metro_means, 'b-', label='Mean')
+            plt.plot(hours, metro_maxes, 'b--', label='Max')
+            plt.plot(hours, metro_mins, 'b:', label='Min')
+            plt.title('Metro Wait Time by Hour')
+            plt.xlabel('Hour')
+            plt.ylabel('Wait Time (minutes)')
+            plt.legend()
+            plt.grid(True)
+
+        else:
+            plt.text(0.5, 0.5, 'Insufficient data for Metro wait time distribution', 
+                    horizontalalignment='center', verticalalignment='center', transform=plt.gca().transAxes)
+        
+        # Plot 2: Wait time distribution for Cercanias
+        plt.subplot(2, 2, 2)
+        if len(self.cercanias.queue_times) > 1:
+            # Group wait times by hour
+            wait_by_hour = {}
+            for i, wait_time in enumerate(self.cercanias.queue_times):
+                # Approximate the hour based on index position
+                arrival_time = i / len(self.cercanias.queue_times) * self.env.now / 60
+                hour = int(arrival_time)
+                if hour not in wait_by_hour:
+                    wait_by_hour[hour] = []
+                wait_by_hour[hour].append(wait_time)
+            
+            # Calculate statistics per hour
+            hours = sorted(wait_by_hour.keys())
+            cercanias_means = [np.mean(wait_by_hour[h]) for h in hours]
+            cercanias_maxes = [np.max(wait_by_hour[h]) for h in hours]
+            cercanias_mins = [np.min(wait_by_hour[h]) for h in hours]
+            
+            plt.fill_between(hours, cercanias_mins, cercanias_maxes, alpha=0.3, color='green')
+            plt.plot(hours, cercanias_means, 'g-', label='Mean')
+            plt.plot(hours, cercanias_maxes, 'g--', label='Max')
+            plt.plot(hours, cercanias_mins, 'g:', label='Min')
+            plt.title('Cercanias Wait Time by Hour')
+            plt.xlabel('Hour')
+            plt.ylabel('Wait Time (minutes)')
+            plt.legend()
+            plt.grid(True)
+
+        else:
+            plt.text(0.5, 0.5, 'Insufficient data for Cercanias wait time distribution', 
+                    horizontalalignment='center', verticalalignment='center', transform=plt.gca().transAxes)
+        
+        # Plot 3: Wait time distribution for Entrance
+        plt.subplot(2, 2, 3)
+        if len(self.entrance.queue_times) > 1:
+            # Group wait times by hour
+            wait_by_hour = {}
+            for i, wait_time in enumerate(self.entrance.queue_times):
+                # Approximate the hour based on index position
+                arrival_time = i / len(self.entrance.queue_times) * self.env.now / 60
+                hour = int(arrival_time)
+                if hour not in wait_by_hour:
+                    wait_by_hour[hour] = []
+                wait_by_hour[hour].append(wait_time)
+            
+            # Calculate statistics per hour
+            hours = sorted(wait_by_hour.keys())
+            entrance_means = [np.mean(wait_by_hour[h]) for h in hours]
+            entrance_maxes = [np.max(wait_by_hour[h]) for h in hours]
+            entrance_mins = [np.min(wait_by_hour[h]) for h in hours]
+            
+            plt.fill_between(hours, entrance_mins, entrance_maxes, alpha=0.3, color='red')
+            plt.plot(hours, entrance_means, 'r-', label='Mean')
+            plt.plot(hours, entrance_maxes, 'r--', label='Max')
+            plt.plot(hours, entrance_mins, 'r:', label='Min')
+            plt.title('Entrance Wait Time by Hour')
+            plt.xlabel('Hour')
+            plt.ylabel('Wait Time (minutes)')
+            plt.legend()
+            plt.grid(True)
+
+        else:
+            plt.text(0.5, 0.5, 'Insufficient data for Entrance wait time distribution', 
+                    horizontalalignment='center', verticalalignment='center', transform=plt.gca().transAxes)
+        
+        # Plot 4: Combined wait time comparison
+        plt.subplot(2, 2, 4)
+        if all(len(area.queue_times) > 1 for area in [self.metro, self.cercanias, self.entrance]):
+            # Get mean wait times for each area by hour
+            metro_hours = sorted(wait_by_hour.keys())
+            cercanias_hours = sorted(wait_by_hour.keys())
+            entrance_hours = sorted(wait_by_hour.keys())
+            
+            # Use a common set of hours for all areas
+            common_hours = sorted(set(metro_hours) & set(cercanias_hours) & set(entrance_hours))
+            
+            if common_hours:
+                # Plot mean wait times for each area
+                plt.plot(common_hours, [np.mean(wait_by_hour.get(h, [0])) for h in common_hours], 'b-', label='Metro')
+                plt.plot(common_hours, [np.mean(wait_by_hour.get(h, [0])) for h in common_hours], 'g-', label='Cercanias')
+                plt.plot(common_hours, [np.mean(wait_by_hour.get(h, [0])) for h in common_hours], 'r-', label='Entrance')
+                plt.title('Mean Wait Time Comparison by Hour')
+                plt.xlabel('Hour')
+                plt.ylabel('Wait Time (minutes)')
+                plt.legend()
+                plt.grid(True)
+            else:
+                plt.text(0.5, 0.5, 'Insufficient common hours for wait time comparison', 
+                        horizontalalignment='center', verticalalignment='center', transform=plt.gca().transAxes)
+        else:
+            plt.text(0.5, 0.5, 'Insufficient data for wait time comparison', 
+                    horizontalalignment='center', verticalalignment='center', transform=plt.gca().transAxes)
+        
+        plt.tight_layout()
+        plt.savefig('station_wait_time_distributions.png')
         plt.show()
         
         # Print summary metrics
@@ -451,6 +756,11 @@ class StationSimulation:
         print(f"Total people generated - Metro: {metrics['total_generated_metro']}")
         print(f"Total people generated - Cercanias: {metrics['total_generated_cercanias']}")
         print(f"Total people generated - Entrance: {metrics['total_generated_entrance']}")
+        print("\nUnexpected Behavior Metrics:")
+        print(f"People who abandoned due to long queues - Metro: {metrics['abandoned_metro']}")
+        print(f"People who abandoned due to long queues - Cercanias: {metrics['abandoned_cercanias']}")
+        print(f"People who abandoned due to long queues - Entrance: {metrics['abandoned_entrance']}")
+        print(f"Total abandonments: {metrics['total_abandoned']}")
 
 
 def run_simulation(sim_duration=24*60):
