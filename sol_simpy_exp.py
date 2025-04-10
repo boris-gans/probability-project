@@ -6,6 +6,10 @@ from scipy import stats
 from collections import defaultdict
 import pandas as pd
 
+
+
+
+# <><><><><><><><><><><><><><><><><><><><><><><><><><<><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><<><><><><><><><><><><><><>
 INITIAL_PEOPLE_ENTRANCE = 0
 INITIAL_PEOPLE_METRO = 0
 INITIAL_PEOPLE_CERCANIAS = 0
@@ -19,14 +23,6 @@ CERCANIAS_CAPACITY = 750
 START_HOUR = 6.0    # 6:00 AM
 END_HOUR = 25.5     # 1:30 AM (next day)
 
-# Time distribution parameters
-PEAK_HOUR_1 = 7.0    # 7:00 AM - Morning peak
-SKEW_PARAM_1 = 4   # Controls skewness, positive for right-skew
-SCALE_PARAM_1 = 4.0   # Scale parameter (spread of distribution)
-
-PEAK_HOUR_2 = 18.0    # 6:00 PM - Evening peak
-SKEW_PARAM_2 = -0.9    # Controls skewness, negative for left-skew
-SCALE_PARAM_2 = 3.0   # Scale parameter (spread of distribution)
 
 # Flow probabilities between areas
 # From Metro
@@ -45,15 +41,39 @@ CERCANIAS_TO_CERCANIAS_PROB = 0.02    # Stay in Cercanias
 CERCANIAS_TO_METRO_PROB = 0.588       # Go to Metro
 CERCANIAS_TO_ENTRANCE_PROB = 0.392    # Go to Entrance
 
-# Generation rates for each area (people per hour)
-METRO_GENERATION_RATE = 40      # People generated directly in Metro
-ENTRANCE_GENERATION_RATE = 30   # People generated directly in Entrance
-CERCANIAS_GENERATION_RATE = 35  # People generated directly in Cercanias
+
+
+# Mu and Llambda for each area 
+# (people per hour / 60 minutes = people per minute)
+METRO_1_LAM = 734 / 60 #~14k people per day (both directions)
+METRO_2_LAM = 435 / 60 #~8.5k people per day (both directions)
+METRO_3_LAM = 350 / 60 #~7k people per day (both directions)
+CERCANIAS_LAM = 657 / 60 #~12k people per day (both directions)
+ENTRANCE_LAM = 292 / 60 #~6k people per day 
+
+METRO_1_MU = 1 / METRO_1_LAM
+METRO_2_MU = 1 / METRO_2_LAM
+METRO_3_MU = 1 / METRO_3_LAM
+CERCANIAS_MU = 1 / CERCANIAS_LAM
+ENTRANCE_MU = 1 / ENTRANCE_LAM
+
+# Capacity for each area (people per minute)
+METRO_1_CAPACITY = 150 #We assume that metro's arrive every 4 minutes and can take 300 people for two directions
+METRO_2_CAPACITY = 150 #We assume that metro's arrive every 4 minutes and can take 300 people for two directions
+METRO_3_CAPACITY = 150 #We assume that metro's arrive every 4 minutes and can take 300 people for two directions
+CERCANIAS_CAPACITY = 120 #We assume that cercanias arrive every 10 minutes and can take 600 people for two directions
+ENTRANCE_CAPACITY = 25 #We know that their are a total of 25 turnstiles to enter the station (10 for metro, 15 for cercanias)
+
+
+
 
 # Departure rates (% of people who leave the system per hour)
 METRO_DEPARTURE_RATE = 0.50       # 10% of Metro population leaves per hour
 ENTRANCE_DEPARTURE_RATE = 0.50    # 15% of Entrance population leaves per hour  
 CERCANIAS_DEPARTURE_RATE = 0.50   # 10% of Cercanias population leaves per hour
+
+
+
 
 # Simulation time step (in minutes)
 STEP_INTERVAL = 10  # Minutes between each flow calculation
@@ -61,6 +81,101 @@ STEP_INTERVAL = 10  # Minutes between each flow calculation
 # Visualization parameters
 DISPLAY_INTERVAL = 60  # Minutes between status updates
 PLOT_TARGET_HOURS = [6.0, 9.0, 12.0, 15.0, 18.0, 21.0, 24.0, 25.5]  # Hours to analyze in charts
+# <><><><><><><><><><><><><><><><><><><><><><><><><><<><><><><><><><>OLD<><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><<><><><><><><><><><><><><>
+
+# Time distribution parameters
+# PEAK_HOUR_1 = 7.0    # 7:00 AM - Morning peak
+# SKEW_PARAM_1 = 4   # Controls skewness, positive for right-skew
+# SCALE_PARAM_1 = 4.0   # Scale parameter (spread of distribution)
+
+# PEAK_HOUR_2 = 18.0    # 6:00 PM - Evening peak
+# SKEW_PARAM_2 = -0.9    # Controls skewness, negative for left-skew
+# SCALE_PARAM_2 = 3.0   # Scale parameter (spread of distribution)
+
+
+# <><><><><><><><><><><><><><><><><><><><><><><><><><<><><><><><><><><>NEW STUFF><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><<><><><><><><><><><><><><>
+class Sink:
+    def __init__(self, env):
+        self.env = env
+        self.departed = 0
+
+    def enter(self, name):
+        print(f"[Sink] {name} exits the system at {self.env.now:.2f}")
+        self.departed += 1
+
+class QueueSystem:
+    def __init__(self, env, name, lam, mu, capacity=1):
+        self.env = env
+        self.name = name
+        self.lam = lam            # Arrival rate (λ)
+        self.mu = mu              # Service rate (μ)
+        self.resource = simpy.Resource(env, capacity=capacity)
+        self.count = 0            # Counter for naming people
+        self.env.process(self.generator())
+
+    def generator(self):
+        while True:
+            yield self.env.timeout(random.expovariate(self.lam))  # Inter-arrival time
+            self.count += 1
+            person_name = f"{self.name} Person {self.count}"
+            self.env.process(self.process_person(person_name))
+
+    def process_person(self, name):
+        arrival_time = self.env.now
+        print(f"[{self.name}] {name} arrives at {arrival_time:.2f}")
+        
+        with self.resource.request() as req:
+            yield req
+            print(f"[{self.name}] {name} starts service at {self.env.now:.2f}")
+            service_time = random.expovariate(self.mu)
+            yield self.env.timeout(service_time)
+            print(f"[{self.name}] {name} leaves at {self.env.now:.2f} (Waited {self.env.now - arrival_time:.2f} mins)")
+
+class Metro(QueueSystem):
+    def __init__(self, env, name="Metro", lam=0.5, mu=0.6, capacity=3):
+        super().__init__(env, name, lam, mu, capacity)
+
+
+class Cercanias(QueueSystem):
+    def __init__(self, env, name="Cercanias", lam=0.3, mu=0.4, capacity=2):
+        super().__init__(env, name, lam, mu, capacity)
+
+
+class Entrance(QueueSystem):
+    def __init__(self, env, name="Entrance", lam=0.6, mu=0.7, capacity=1):
+        super().__init__(env, name, lam, mu, capacity)
+
+
+
+class Person:
+    """Represents a person moving through the station"""
+    def __init__(self, env, id, source="Generated", destination=None):
+        self.env = env
+        self.id = id
+        self.entry_time = env.now
+        self.source = source
+        self.destination = destination
+        self.current_area = None
+        self.wait_start = None
+        self.wait_time = 0  # Total wait time in minutes
+        
+    def start_waiting(self):
+        """Mark the start of waiting time"""
+        self.wait_start = self.env.now
+        
+    def stop_waiting(self, area):
+        """Record the waiting time for an area"""
+        if self.wait_start is not None:
+            self.wait_time = self.env.now - self.wait_start
+            area.queue_times.append(self.wait_time)
+            self.wait_start = None
+
+
+
+
+
+# <><><><><><><><><><><><><><><><><><><><><><><><><><<><><><><><><><><>OLD STUFF><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><<><><><><><><><><><><><><>
+
 
 class TimeOfDay:
     """Models time of day and provides factors to adjust flow rates"""
@@ -204,54 +319,9 @@ class StationArea:
         self.step_queued = 0
         self.step_left_from_queue = 0
 
-class Entrance(StationArea):
-    """Entrance area of the station"""
-    def __init__(self, env, initial_people=INITIAL_PEOPLE_ENTRANCE, 
-                 generation_rate=ENTRANCE_GENERATION_RATE, 
-                 departure_rate=ENTRANCE_DEPARTURE_RATE):
-        super().__init__(env, "Entrance", initial_people, float('inf'), 
-                        generation_rate, departure_rate)
 
-class Metro(StationArea):
-    """Metro area of the station"""
-    def __init__(self, env, initial_people=INITIAL_PEOPLE_METRO, 
-                capacity=METRO_CAPACITY, 
-                generation_rate=METRO_GENERATION_RATE, 
-                departure_rate=METRO_DEPARTURE_RATE):
-        super().__init__(env, "Metro", initial_people, capacity, 
-                        generation_rate, departure_rate)
 
-class Cercanias(StationArea):
-    """Cercanias area of the station"""
-    def __init__(self, env, initial_people=INITIAL_PEOPLE_CERCANIAS, 
-                capacity=CERCANIAS_CAPACITY, 
-                generation_rate=CERCANIAS_GENERATION_RATE, 
-                departure_rate=CERCANIAS_DEPARTURE_RATE):
-        super().__init__(env, "Cercanias", initial_people, capacity, 
-                        generation_rate, departure_rate)
 
-class Person:
-    """Represents a person moving through the station"""
-    def __init__(self, env, id, source="Generated", destination=None):
-        self.env = env
-        self.id = id
-        self.entry_time = env.now
-        self.source = source
-        self.destination = destination
-        self.current_area = None
-        self.wait_start = None
-        self.wait_time = 0  # Total wait time in minutes
-        
-    def start_waiting(self):
-        """Mark the start of waiting time"""
-        self.wait_start = self.env.now
-        
-    def stop_waiting(self, area):
-        """Record the waiting time for an area"""
-        if self.wait_start is not None:
-            self.wait_time = self.env.now - self.wait_start
-            area.queue_times.append(self.wait_time)
-            self.wait_start = None
 
 class StationSimulation:
     """Main simulation class for the Sol Metro station"""
