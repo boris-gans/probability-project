@@ -298,34 +298,34 @@ class StationSimulation:
             return self.cercanias
         return None
     
-    def transfer_person(self, source_area, destination_name):
-        """Transfer a person from source area to destination area"""
-        # Get destination area
-        destination_area = self.get_area_by_name(destination_name)
+    # def transfer_person(self, source_area, destination_name):
+    #     """Transfer a person from source area to destination area"""
+    #     # Get destination area
+    #     destination_area = self.get_area_by_name(destination_name)
         
-        if destination_area is None or source_area.name == destination_area.name:
-            return True  # No transfer needed or invalid destination
+    #     if destination_area is None or source_area.name == destination_area.name:
+    #         return True  # No transfer needed or invalid destination
         
-        # Check if there's space in the destination
-        if destination_area.resource.level >= destination_area.resource.capacity:
-            # Destination is full, person can't transfer
-            source_area.turned_away += 1
-            source_area.metrics['rejected'][destination_area.name] += 1
-            # print(f"Person couldn't transfer from {source_area.name} to {destination_area.name} - destination full")
-            return False
+    #     # Check if there's space in the destination
+    #     if destination_area.resource.level >= destination_area.resource.capacity:
+    #         # Destination is full, person can't transfer
+    #         source_area.turned_away += 1
+    #         source_area.metrics['rejected'][destination_area.name] += 1
+    #         # print(f"Person couldn't transfer from {source_area.name} to {destination_area.name} - destination full")
+    #         return False
         
-        # Remove from source
-        yield source_area.resource.get(1)
-        source_area.metrics['exits'][destination_area.name] += 1
-        source_area.step_output += 1
+    #     # Remove from source
+    #     yield source_area.resource.get(1)
+    #     source_area.metrics['exits'][destination_area.name] += 1
+    #     source_area.step_output += 1
         
-        # Add to destination
-        yield destination_area.resource.put(1)
-        destination_area.metrics['entries'][source_area.name] += 1
-        destination_area.step_input += 1
+    #     # Add to destination
+    #     yield destination_area.resource.put(1)
+    #     destination_area.metrics['entries'][source_area.name] += 1
+    #     destination_area.step_input += 1
         
-        # print(f"Person transferred from {source_area.name} to {destination_area.name}")
-        return True
+    #     # print(f"Person transferred from {source_area.name} to {destination_area.name}")
+    #     return True
     
     def generate_and_route_people(self, area):
         """Generate people in an area and immediately route them to their destinations"""
