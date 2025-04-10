@@ -6,14 +6,6 @@ from collections import defaultdict
 import pandas as pd
 
 # <><><><><><><><><><><><><><><><><><><><><><><><><><<><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><><<><><><><><><><><><><><><>
-INITIAL_PEOPLE_ENTRANCE = 0
-INITIAL_PEOPLE_METRO = 0
-INITIAL_PEOPLE_CERCANIAS = 0
-
-# Capacity limits
-METRO_CAPACITY = 1128
-# ~22k people per day / 19.5 operational hours = 1128 days
-CERCANIAS_CAPACITY = 750 
 
 # Operating hours
 START_HOUR = 6.0    # 6:00 AM
@@ -60,9 +52,21 @@ ENTRANCE_CAPACITY = 100 #We know that their are a total of 25 turnstiles to ente
 # Simulation time step (in minutes)
 STEP_INTERVAL = 10  # Minutes between each flow calculation
 
-# Visualization parameters
-DISPLAY_INTERVAL = 60  # Minutes between status updates
-PLOT_TARGET_HOURS = [6.0, 9.0, 12.0, 15.0, 18.0, 21.0, 24.0, 25.5]  # Hours to analyze in charts
+# Add these helper functions after the constants but before the classes
+def is_operating_time(time_in_minutes):
+    """Check if the current time is within station operating hours"""
+    hour_of_day = (time_in_minutes / 60) % 24
+    return (START_HOUR <= hour_of_day < 24.0) or (0 <= hour_of_day < (END_HOUR - 24))
+
+def sim_time_to_time_of_day(sim_time_minutes):
+    """Convert simulation time in minutes to hours of day (0-24)"""
+    return (sim_time_minutes / 60) % 24
+
+def format_hour_of_day(hour):
+    """Format hour as HH:MM in 24-hour time"""
+    h = int(hour)
+    m = int((hour - h) * 60)
+    return f"{h:02d}:{m:02d}"
 
 class Person:
     """Represents a person moving through the station"""
@@ -121,6 +125,12 @@ class Area:
             # Wait for next arrival
             interarrival_time = random.expovariate(self.arrival_rate)
             yield self.env.timeout(interarrival_time)
+            
+            # Check if it's operating hours before generating new people
+            current_time = self.env.now
+            if not is_operating_time(current_time):
+                # Skip generation outside operating hours
+                continue
             
             # Create new person
             person_id += 1
@@ -341,16 +351,21 @@ class StationSimulation:
         while True:
             yield self.env.timeout(60)  # Every hour
             
-            hour = int(self.env.now / 60)
-            print(f"Hour {hour}: metro {self.metro.people_count} cerc {self.cercanias.people_count} entrance {self.entrance.people_count}")
+            # Get current hour as index (simulation hour)
+            sim_hour = int(self.env.now / 60)
+            
+            # Get actual time of day (for display purposes)
+            hour_of_day = sim_time_to_time_of_day(self.env.now)
+            
+            print(f"Hour {sim_hour} ({format_hour_of_day(hour_of_day)}): metro {self.metro.people_count} cerc {self.cercanias.people_count} entrance {self.entrance.people_count}")
 
-            self.hourly_data[hour]['metro_count'] = self.metro.people_count
-            self.hourly_data[hour]['cercanias_count'] = self.cercanias.people_count
-            self.hourly_data[hour]['entrance_count'] = self.entrance.people_count
-            self.hourly_data[hour]['total_count'] = (self.metro.people_count + 
-                                                   self.cercanias.people_count + 
-                                                   self.entrance.people_count)
-            self.hourly_data[hour]['exits'] = self.sink.departed
+            self.hourly_data[sim_hour]['metro_count'] = self.metro.people_count
+            self.hourly_data[sim_hour]['cercanias_count'] = self.cercanias.people_count
+            self.hourly_data[sim_hour]['entrance_count'] = self.entrance.people_count
+            self.hourly_data[sim_hour]['total_count'] = (self.metro.people_count + 
+                                                       self.cercanias.people_count + 
+                                                       self.entrance.people_count)
+            self.hourly_data[sim_hour]['exits'] = self.sink.departed
     
     def calculate_metrics(self):
         """Calculate final metrics after simulation"""
@@ -414,13 +429,20 @@ class StationSimulation:
         
         # Plot 1: People count per area over time
         plt.subplot(4, 2, 1)
-        plt.plot(df.index, df.metro_count, label='Metro')
-        plt.plot(df.index, df.cercanias_count, label='Cercanias')
-        plt.plot(df.index, df.entrance_count, label='Entrance')
-        plt.plot(df.index, df.total_count, label='Total', linestyle='--')
+        
+        # Convert indices to time of day
+        time_of_day = [(i % 24) for i in df.index]
+        x_ticks = range(0, 26, 3)
+        x_labels = [format_hour_of_day(h) for h in x_ticks]
+        
+        plt.plot(time_of_day, df.metro_count, label='Metro')
+        plt.plot(time_of_day, df.cercanias_count, label='Cercanias')
+        plt.plot(time_of_day, df.entrance_count, label='Entrance')
+        plt.plot(time_of_day, df.total_count, label='Total', linestyle='--')
         plt.title('People Count Over Time')
-        plt.xlabel('Hour')
+        plt.xlabel('Time of Day (24h)')
         plt.ylabel('Count')
+        plt.xticks(np.arange(0, 24, 3), x_labels[0:8])
         plt.legend()
         plt.grid(True)
         
@@ -506,13 +528,12 @@ class StationSimulation:
         
         # Plot 6: Queue length distribution over time for Metro
         plt.subplot(4, 2, 6)
-        # Create data for heatmap-style visualization
         if len(self.metro.queue_length) > 1:
             # Group queue lengths by hour
             queue_by_hour = {}
             for i, q_len in enumerate(self.metro.queue_length):
                 arrival_time = i / len(self.metro.queue_length) * self.env.now / 60  # Approximate arrival hour
-                hour = int(arrival_time)
+                hour = int(arrival_time) % 24  # Convert to 24-hour time
                 if hour not in queue_by_hour:
                     queue_by_hour[hour] = []
                 queue_by_hour[hour].append(q_len)
@@ -528,11 +549,11 @@ class StationSimulation:
             plt.plot(hours, metro_maxes, 'b--', label='Max')
             plt.plot(hours, metro_mins, 'b:', label='Min')
             plt.title('Metro Queue Length by Hour')
-            plt.xlabel('Hour')
+            plt.xlabel('Time of Day (24h)')
             plt.ylabel('Queue Length')
+            plt.xticks(np.arange(0, 24, 3), [format_hour_of_day(h) for h in np.arange(0, 24, 3)])
             plt.legend()
             plt.grid(True)
-
         else:
             plt.text(0.5, 0.5, 'Insufficient data for Metro queue distribution', 
                     horizontalalignment='center', verticalalignment='center', transform=plt.gca().transAxes)
@@ -543,8 +564,8 @@ class StationSimulation:
             # Group queue lengths by hour
             queue_by_hour = {}
             for i, q_len in enumerate(self.cercanias.queue_length):
-                arrival_time = i / len(self.cercanias.queue_length) * self.env.now / 60  # Approximate arrival hour
-                hour = int(arrival_time)
+                arrival_time = i / len(self.cercanias.queue_length) * self.env.now / 60
+                hour = int(arrival_time) % 24
                 if hour not in queue_by_hour:
                     queue_by_hour[hour] = []
                 queue_by_hour[hour].append(q_len)
@@ -560,11 +581,11 @@ class StationSimulation:
             plt.plot(hours, cercanias_maxes, 'g--', label='Max')
             plt.plot(hours, cercanias_mins, 'g:', label='Min')
             plt.title('Cercanias Queue Length by Hour')
-            plt.xlabel('Hour')
+            plt.xlabel('Time of Day (24h)')
             plt.ylabel('Queue Length')
+            plt.xticks(np.arange(0, 24, 3), [format_hour_of_day(h) for h in np.arange(0, 24, 3)])
             plt.legend()
             plt.grid(True)
-
         else:
             plt.text(0.5, 0.5, 'Insufficient data for Cercanias queue distribution', 
                     horizontalalignment='center', verticalalignment='center', transform=plt.gca().transAxes)
@@ -576,7 +597,7 @@ class StationSimulation:
             queue_by_hour = {}
             for i, q_len in enumerate(self.entrance.queue_length):
                 arrival_time = i / len(self.entrance.queue_length) * self.env.now / 60  # Approximate arrival hour
-                hour = int(arrival_time)
+                hour = int(arrival_time) % 24  # Convert to 24-hour time
                 if hour not in queue_by_hour:
                     queue_by_hour[hour] = []
                 queue_by_hour[hour].append(q_len)
@@ -592,11 +613,11 @@ class StationSimulation:
             plt.plot(hours, entrance_maxes, 'r--', label='Max')
             plt.plot(hours, entrance_mins, 'r:', label='Min')
             plt.title('Entrance Queue Length by Hour')
-            plt.xlabel('Hour')
+            plt.xlabel('Time of Day (24h)')
             plt.ylabel('Queue Length')
+            plt.xticks(np.arange(0, 24, 3), [format_hour_of_day(h) for h in np.arange(0, 24, 3)])
             plt.legend()
             plt.grid(True)
-
         else:
             plt.text(0.5, 0.5, 'Insufficient data for Entrance queue distribution', 
                     horizontalalignment='center', verticalalignment='center', transform=plt.gca().transAxes)
@@ -615,7 +636,7 @@ class StationSimulation:
             for i, wait_time in enumerate(self.metro.queue_times):
                 # Approximate the hour based on index position
                 arrival_time = i / len(self.metro.queue_times) * self.env.now / 60
-                hour = int(arrival_time)
+                hour = int(arrival_time) % 24  # Convert to 24-hour time
                 if hour not in wait_by_hour:
                     wait_by_hour[hour] = []
                 wait_by_hour[hour].append(wait_time)
@@ -631,11 +652,11 @@ class StationSimulation:
             plt.plot(hours, metro_maxes, 'b--', label='Max')
             plt.plot(hours, metro_mins, 'b:', label='Min')
             plt.title('Metro Wait Time by Hour')
-            plt.xlabel('Hour')
+            plt.xlabel('Time of Day (24h)')
             plt.ylabel('Wait Time (minutes)')
+            plt.xticks(np.arange(0, 24, 3), [format_hour_of_day(h) for h in np.arange(0, 24, 3)])
             plt.legend()
             plt.grid(True)
-
         else:
             plt.text(0.5, 0.5, 'Insufficient data for Metro wait time distribution', 
                     horizontalalignment='center', verticalalignment='center', transform=plt.gca().transAxes)
@@ -648,7 +669,7 @@ class StationSimulation:
             for i, wait_time in enumerate(self.cercanias.queue_times):
                 # Approximate the hour based on index position
                 arrival_time = i / len(self.cercanias.queue_times) * self.env.now / 60
-                hour = int(arrival_time)
+                hour = int(arrival_time) % 24  # Convert to 24-hour time
                 if hour not in wait_by_hour:
                     wait_by_hour[hour] = []
                 wait_by_hour[hour].append(wait_time)
@@ -664,11 +685,11 @@ class StationSimulation:
             plt.plot(hours, cercanias_maxes, 'g--', label='Max')
             plt.plot(hours, cercanias_mins, 'g:', label='Min')
             plt.title('Cercanias Wait Time by Hour')
-            plt.xlabel('Hour')
+            plt.xlabel('Time of Day (24h)')
             plt.ylabel('Wait Time (minutes)')
+            plt.xticks(np.arange(0, 24, 3), [format_hour_of_day(h) for h in np.arange(0, 24, 3)])
             plt.legend()
             plt.grid(True)
-
         else:
             plt.text(0.5, 0.5, 'Insufficient data for Cercanias wait time distribution', 
                     horizontalalignment='center', verticalalignment='center', transform=plt.gca().transAxes)
@@ -681,7 +702,7 @@ class StationSimulation:
             for i, wait_time in enumerate(self.entrance.queue_times):
                 # Approximate the hour based on index position
                 arrival_time = i / len(self.entrance.queue_times) * self.env.now / 60
-                hour = int(arrival_time)
+                hour = int(arrival_time) % 24  # Convert to 24-hour time
                 if hour not in wait_by_hour:
                     wait_by_hour[hour] = []
                 wait_by_hour[hour].append(wait_time)
@@ -697,11 +718,11 @@ class StationSimulation:
             plt.plot(hours, entrance_maxes, 'r--', label='Max')
             plt.plot(hours, entrance_mins, 'r:', label='Min')
             plt.title('Entrance Wait Time by Hour')
-            plt.xlabel('Hour')
+            plt.xlabel('Time of Day (24h)')
             plt.ylabel('Wait Time (minutes)')
+            plt.xticks(np.arange(0, 24, 3), [format_hour_of_day(h) for h in np.arange(0, 24, 3)])
             plt.legend()
             plt.grid(True)
-
         else:
             plt.text(0.5, 0.5, 'Insufficient data for Entrance wait time distribution', 
                     horizontalalignment='center', verticalalignment='center', transform=plt.gca().transAxes)
@@ -723,8 +744,9 @@ class StationSimulation:
                 plt.plot(common_hours, [np.mean(wait_by_hour.get(h, [0])) for h in common_hours], 'g-', label='Cercanias')
                 plt.plot(common_hours, [np.mean(wait_by_hour.get(h, [0])) for h in common_hours], 'r-', label='Entrance')
                 plt.title('Mean Wait Time Comparison by Hour')
-                plt.xlabel('Hour')
+                plt.xlabel('Time of Day (24h)')
                 plt.ylabel('Wait Time (minutes)')
+                plt.xticks(np.arange(0, 24, 3), [format_hour_of_day(h) for h in np.arange(0, 24, 3)])
                 plt.legend()
                 plt.grid(True)
             else:
