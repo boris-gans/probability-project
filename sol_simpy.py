@@ -6,16 +6,14 @@ from scipy import stats
 from collections import defaultdict
 import pandas as pd
 
-# Simulation parameters (easy to modify)
-# --------------------------------------
-# Initial values
 INITIAL_PEOPLE_ENTRANCE = 100
 INITIAL_PEOPLE_METRO = 100
 INITIAL_PEOPLE_CERCANIAS = 100
 
 # Capacity limits
-METRO_CAPACITY = 1000
-CERCANIAS_CAPACITY = 750
+METRO_CAPACITY = 1128
+# ~22k people per day / 19.5 operational hours = 1128 days
+CERCANIAS_CAPACITY = 750 
 
 # Operating hours
 START_HOUR = 6.0    # 6:00 AM
@@ -736,6 +734,7 @@ class StationSimulation:
         
         # Add a legend
         ax.legend()
+
 
 def run_simulation(sim_duration=24*60):
     """Run the simulation for the specified duration in minutes"""
